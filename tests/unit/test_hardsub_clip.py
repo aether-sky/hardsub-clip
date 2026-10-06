@@ -50,7 +50,42 @@ class AssTests(unittest.TestCase):
         self.assertEqual(hardsub_clip.classify(40, 24 * 60)[0], "unclear")
 
 
+class ClipRangeTests(unittest.TestCase):
+    LINES = [{"start": 10.0, "end": 13.0, "style": "Default", "raw": "Hello there.", "text": "Hello there."},
+             {"start": 20.0, "end": 22.0, "style": "Signs", "raw": "SHOP", "text": "SHOP"}]
+
+    def test_both_ends_get_padding(self):
+        self.assertEqual(hardsub_clip.clip_range(15, 18, self.LINES, 100), (14.5, 18.5))
+
+    def test_start_inside_a_line_moves_before_it(self):
+        self.assertEqual(hardsub_clip.clip_range(12, 18, self.LINES, 100), (9.5, 18.5))
+
+    def test_start_inside_a_sign_is_not_moved(self):
+        self.assertEqual(hardsub_clip.clip_range(21, 25, self.LINES, 100), (20.5, 25.5))
+
+    def test_padding_stops_at_the_video_edges(self):
+        self.assertEqual(hardsub_clip.clip_range(0.2, 99.8, [], 100), (0.0, 100))
+
+    def test_moved_start_inside_the_previous_line_moves_again(self):
+        lines = [{"start": 8.0, "end": 9.8, "style": "Default", "raw": "One.", "text": "One."}] + self.LINES
+        self.assertEqual(hardsub_clip.clip_range(12, 18, lines, 100), (7.5, 18.5))
+
+
 class TrackTests(unittest.TestCase):
+    def test_sidecar_of_a_longer_episode_number_is_not_matched(self):
+        video = Path("Show - 1.mkv")
+        self.assertTrue(hardsub_clip.is_sidecar(Path("Show - 1.en.ass"), video))
+        self.assertTrue(hardsub_clip.is_sidecar(Path("Show - 1 [English].srt"), video))
+        self.assertFalse(hardsub_clip.is_sidecar(Path("Show - 12.en.ass"), video))
+        self.assertFalse(hardsub_clip.is_sidecar(Path("Show - 1.mkv"), video))
+
+    def test_unsupported_codec_is_listed_without_being_read(self):
+        caption = {"kind": "embedded", "index": 3, "codec": "eia_608", "lang": "eng", "title": "", "forced": False,
+                   "default": True, "frames": None}
+        hardsub_clip.assess(None, None, Path("x.mkv"), [caption], 24 * 60, 0.0, Path("."))
+        self.assertEqual(caption["verdict"], "unsupported")
+        self.assertIsNone(hardsub_clip.choose([dict(caption, english=True)]))
+
     def test_sidecar_language_from_name(self):
         video = Path("Show - 01.mkv")
         self.assertEqual(hardsub_clip.sidecar_lang(Path("Show - 01.en.ass"), video), "eng")

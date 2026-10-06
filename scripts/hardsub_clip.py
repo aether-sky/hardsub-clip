@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-TEXT_CODECS = {"ass", "ssa", "subrip", "srt", "mov_text", "webvtt", "text"}
+TEXT_CODECS = {"ass", "ssa", "subrip", "srt", "mov_text", "webvtt", "vtt", "text"}
 IMAGE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}
 SIDECAR_EXTS = {".ass", ".ssa", ".srt", ".vtt"}
 ENGLISH_LANGS = {"en", "eng", "en-us", "en-gb"}
@@ -23,6 +23,7 @@ POSITIONED = re.compile(r"\\(?:pos|move|org|i?clip)\(|\\(?:kf|ko|k|K)\d")
 OVERRIDE = re.compile(r"\{[^}]*\}")
 FULL_PER_MIN = 3.0   # dialogue lines per minute of runtime at or above which a track is full subtitles
 SIGNS_PER_MIN = 1.0  # below this a track is signs and songs only
+PADDING = 0.5        # seconds added to each end of the asked-for range, and kept before a line the start would cut
 DEFAULT_OUT_DIR = Path.home() / "Videos" / "clips"
 
 
@@ -114,6 +115,13 @@ def text_looks_english(events):
     return sum(w in ENGLISH_WORDS for w in words) / len(words) >= 1 / 6
 
 
+def is_sidecar(path, video):
+    """A subtitle file named after the video: its stem followed by a separator, so 'Show - 1' skips 'Show - 12'."""
+    rest = path.name[len(video.stem):]
+    return (path.suffix.lower() in SIDECAR_EXTS and path.name.startswith(video.stem)
+            and rest[:1] in tuple(". _-[("))
+
+
 def sidecar_lang(path, video):
     """Language marker in a sidecar name such as 'Show - 01.en.ass' or 'Show - 01 [English].srt'."""
     rest = path.stem[len(video.stem):].lower()
@@ -147,7 +155,7 @@ def candidate_tracks(info, video):
                        "default": bool(s.get("disposition", {}).get("default")),
                        "frames": next((int(v) for k, v in tags.items() if k.upper().startswith("NUMBER_OF_FRAMES")), None)})
     for path in sorted(video.parent.iterdir()):
-        if path.suffix.lower() in SIDECAR_EXTS and path.name.startswith(video.stem):
+        if is_sidecar(path, video):
             tracks.append({"kind": "file", "path": path, "codec": path.suffix[1:].lower(),
                            "lang": sidecar_lang(path, video), "title": path.name, "forced": False, "default": False,
                            "frames": None})
@@ -180,28 +188,34 @@ def extract_text_tracks(ffmpeg, video, tracks, work):
         t["events"] = parse_ass(t["ass"].read_text(encoding="utf-8-sig", errors="replace"))
 
 
-def count_image_events(ffprobe, video, track):
-    """Displayed subtitles in an image track: the muxer's frame count, else counted packets, halved because
-    each display is followed by a clearing packet."""
-    frames = track["frames"]
-    if frames is None:
-        out = run([ffprobe, "-v", "error", "-count_packets", "-select_streams", str(track["index"]),
-                   "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(video)])
-        frames = int(out.strip() or 0)
-    return frames // 2
+def image_events(ffprobe, video, index, offset):
+    """Displays of an image track, each shown until the next display set, timed from the start of the file."""
+    frames = json.loads(run([ffprobe, "-v", "error", "-select_streams", str(index), "-show_frames",
+                             "-show_entries", "frame=pts_time,num_rects", "-of", "json", str(video)]))["frames"]
+    times = [float(f["pts_time"]) - offset for f in frames]
+    return [{"start": times[n], "end": times[n + 1] if n + 1 < len(times) else times[n] + 5,
+             "style": "", "raw": "", "text": "(image)"}
+            for n, f in enumerate(frames) if f.get("num_rects")]
 
 
-def assess(ffmpeg, ffprobe, video, tracks, duration, work):
-    """Fill in verdict, dialogue_lines and per_min on each track."""
-    text = [t for t in tracks if t["codec"] not in IMAGE_CODECS]
+def assess(ffmpeg, ffprobe, video, tracks, duration, offset, work):
+    """Fill in verdict, dialogue_lines and per_min on each track. Image tracks with a muxer frame count are
+    counted from it, halved because each display is followed by a clearing packet, and are not read."""
+    text = [t for t in tracks if t["codec"] in TEXT_CODECS]
     extract_text_tracks(ffmpeg, video, text, work)
     for t in tracks:
         if t["codec"] in IMAGE_CODECS:
-            t["dialogue_lines"] = count_image_events(ffprobe, video, t)
-            t["note"] = "image subtitles: line count estimated, styles unknown"
-        else:
+            if t["frames"] is None:
+                t["events"] = image_events(ffprobe, video, t["index"], offset)
+            t["dialogue_lines"] = t["frames"] // 2 if t["frames"] is not None else len(t["events"])
+            t["note"] = "image subtitles, styles unknown"
+        elif t["codec"] in TEXT_CODECS:
             t["dialogue_lines"] = sum(map(is_dialogue, t["events"]))
             t["note"] = f"{len(t['events'])} events"
+        else:
+            t["verdict"], t["per_min"], t["dialogue_lines"] = "unsupported", 0.0, 0
+            t["note"] = "codec cannot be burned in"
+            continue
         if t["forced"]:
             t["verdict"], t["per_min"] = "signs-songs", t["dialogue_lines"] / (duration / 60)
         else:
@@ -212,6 +226,15 @@ def choose(tracks):
     """The English full-subtitle track with the default flag, then the most dialogue; None if there is none."""
     full = [t for t in tracks if t["english"] and t["verdict"] == "full"]
     return max(full, key=lambda t: (t["default"], t["dialogue_lines"]), default=None)
+
+
+def clip_range(start, end, events, duration):
+    """The asked-for range padded on both ends, with the start moved back before any dialogue line it would cut,
+    repeatedly, since the moved start can land in the line before."""
+    start, end = max(0.0, start - PADDING), min(duration, end + PADDING)
+    while cut := [e["start"] for e in events if e["start"] < start < e["end"] and is_dialogue(e)]:
+        start = max(0.0, min(cut) - PADDING)
+    return start, end
 
 
 def pick_audio(info, wanted):
@@ -282,6 +305,7 @@ def main():
     ffmpeg, ffprobe = find_tools()
     info = probe(ffprobe, video)
     duration = float(info["format"].get("duration") or 0)
+    offset = float(info["format"].get("start_time") or 0)
     if not a.list:
         if a.end <= a.start:
             sys.exit(f"end {a.end:.3f}s is not after start {a.start:.3f}s")
@@ -293,7 +317,7 @@ def main():
         sys.exit("the video has no subtitle streams and no subtitle files sit next to it")
     with tempfile.TemporaryDirectory(prefix="hardsub-clip-") as tmp:
         work = Path(tmp)
-        assess(ffmpeg, ffprobe, video, tracks, duration, work)
+        assess(ffmpeg, ffprobe, video, tracks, duration, offset, work)
         for t in tracks:
             t["english"] = is_english(t["lang"], t["title"])
             if not t["english"] and t["lang"].lower() in UNTAGGED_LANGS and "events" in t:
@@ -310,24 +334,30 @@ def main():
                           (t["kind"] == "file" and t["path"].name == a.track)), None)
             if not track:
                 sys.exit(f"--track {a.track}: no such subtitle stream or file in the list above")
+            if track["verdict"] == "unsupported":
+                sys.exit(f"--track {a.track}: {track['codec']} subtitles cannot be burned in")
         else:
             track = choose(tracks)
             if not track:
                 sys.exit("no English track has full dialogue (see the list above). Pass --track to use one anyway.")
         print(f"using {describe(track)}")
+        if track["codec"] in IMAGE_CODECS and "events" not in track:
+            track["events"] = image_events(ffprobe, video, track["index"], offset)
 
+        start, end = clip_range(a.start, a.end, track.get("events", []), duration)
+        print(f"clip runs {start:.2f}s to {end:.2f}s (asked for {a.start:.2f}s to {a.end:.2f}s)")
         if "events" in track:
-            in_clip = [e for e in track["events"] if e["end"] > a.start and e["start"] < a.end and is_dialogue(e)]
+            in_clip = [e for e in track["events"] if e["end"] > start and e["start"] < end and is_dialogue(e)]
             print(f"{len(in_clip)} dialogue lines fall in the clip:")
             for e in in_clip:
-                print(f"  {e['start'] - a.start:6.2f}s  {e['text']}")
+                print(f"  {e['start'] - start:6.2f}s  {e['text']}")
             if not in_clip:
                 print("  (none: the clip will have no dialogue subtitles)")
 
         audio = pick_audio(info, a.audio)
-        out = (a.output or DEFAULT_OUT_DIR / f"{video.stem} [{label_time(a.start)}-{label_time(a.end)}].mp4").resolve()
+        out = (a.output or DEFAULT_OUT_DIR / f"{video.stem} [{label_time(start)}-{label_time(end)}].mp4").resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
-        render(ffmpeg, video, info, track, a.start, a.end, audio, out, work)
+        render(ffmpeg, video, info, track, start, end, audio, out, work)
         print(f"wrote {out}")
 
 

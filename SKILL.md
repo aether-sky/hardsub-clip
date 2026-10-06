@@ -15,7 +15,9 @@ python scripts\hardsub_clip.py "<video>" --list
 ```
 
 Timestamps are times in the episode: `83`, `1:23`, `1:23.5` or `1:02:03`. Turn whatever the user
-said ("12m34s", "at 12:34 until 12:50") into one of these forms. Output defaults to
+said ("12m34s", "at 12:34 until 12:50") into one of these forms. Pass the range exactly as asked:
+the script pads each end by half a second, and when the padded start falls inside a dialogue line
+it moves back to half a second before that line, so the clip never opens mid-sentence. Output defaults to
 `~\Videos\clips\<video name> [12m34s-12m50s].mp4`; pass `-o` when the user names a place.
 
 ## How the track is chosen
@@ -23,8 +25,10 @@ said ("12m34s", "at 12:34 until 12:50") into one of these forms. Output defaults
 Each track gets a verdict from its dialogue lines per minute of runtime. A dialogue line is text in
 a style that isn't named like a sign, song, OP/ED, karaoke or title, without `\pos`, `\move`,
 `\clip` or karaoke tags. 3 or more per minute is `full`. Under 1 per minute, a forced flag, or a
-title like "Signs & Songs" is `signs-songs`. In between is `unclear`. Image tracks (PGS, VobSub) are
-counted from the muxer's frame count, so their verdict is rougher.
+title like "Signs & Songs" is `signs-songs`. In between is `unclear`. Image tracks (PGS, VobSub) have
+no styles to read, so every display counts as a line and their verdict is rougher; they are counted
+from the muxer's frame count when it has one, else by reading the track. Streams that can't be
+burned in, such as broadcast captions, are listed as `unsupported` and never picked.
 
 English means a `eng`/`en` language tag or "English" in the title. Fansubs often leave the tag
 empty, so an untagged text track counts as English when its text reads as English.
