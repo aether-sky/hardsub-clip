@@ -74,7 +74,9 @@ class RenderTests(unittest.TestCase):
 
     @classmethod
     def make(cls, args):
-        subprocess.run([cls.ffmpeg, "-v", "error", "-y", *args], check=True)
+        result = subprocess.run([cls.ffmpeg, "-v", "error", "-y", *args], capture_output=True, text=True, check=True)
+        if result.stderr:
+            raise AssertionError(f"ffmpeg reported an error while building a fixture:\n{result.stderr}")
 
     @classmethod
     def tearDownClass(cls):
@@ -84,14 +86,16 @@ class RenderTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SCRIPT), str(video), *args], capture_output=True, text=True,
                                 encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
         return result.stdout
 
     def bright_pixels(self, clip, at):
         """Near-white pixels in the bottom third of the frame at `at` seconds into the clip."""
-        raw = subprocess.run([self.ffmpeg, "-v", "error", "-ss", str(at), "-i", str(clip), "-frames:v", "1",
-                              "-vf", "crop=iw:ih/3:0:ih*2/3,format=gray", "-f", "rawvideo", "-"],
-                             capture_output=True, check=True).stdout
-        return sum(b > 200 for b in raw)
+        result = subprocess.run([self.ffmpeg, "-v", "error", "-ss", str(at), "-i", str(clip), "-frames:v", "1",
+                                 "-vf", "crop=iw:ih/3:0:ih*2/3,format=gray", "-f", "rawvideo", "-"],
+                                capture_output=True, check=True)
+        self.assertEqual(result.stderr, b"")
+        return sum(b > 200 for b in result.stdout)
 
     def test_signs_track_is_recognised_even_when_default(self):
         report = self.run_clip(self.video, "--list")

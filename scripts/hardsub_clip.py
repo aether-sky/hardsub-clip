@@ -89,10 +89,13 @@ def is_dialogue(event):
     return bool(event["text"]) and not SIGN_STYLE.search(event["style"]) and not POSITIONED.search(event["raw"])
 
 
-def classify(dialogue_lines, duration, title=""):
-    """'full', 'signs-songs' or 'unclear' from dialogue lines per minute of runtime, plus the rate."""
+def classify(dialogue_lines, duration, title="", forced=False):
+    """'full', 'signs-songs' or 'unclear' from dialogue lines per minute of runtime, plus the rate. A forced track
+    is always 'signs-songs'."""
     per_min = dialogue_lines / (duration / 60) if duration else 0.0
-    if per_min >= FULL_PER_MIN:
+    if forced:
+        verdict = "signs-songs"
+    elif per_min >= FULL_PER_MIN:
         verdict = "full"
     elif per_min < SIGNS_PER_MIN or SIGN_TITLE.search(title or ""):
         verdict = "signs-songs"
@@ -132,9 +135,12 @@ def sidecar_lang(path, video):
 
 
 def run(cmd, cwd=None):
+    """stdout of cmd; anything it prints to stderr is passed on, and a failure ends the script."""
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode:
         sys.exit(f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stderr.strip()}")
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
     return result.stdout
 
 
@@ -200,10 +206,15 @@ def image_events(ffprobe, video, index, offset):
 
 def assess(ffmpeg, ffprobe, video, tracks, duration, offset, work):
     """Fill in verdict, dialogue_lines and per_min on each track. Image tracks with a muxer frame count are
-    counted from it, halved because each display is followed by a clearing packet, and are not read."""
+    counted from it, halved because each display is followed by a clearing packet. Other image tracks are read
+    only when tagged English, since an untagged or other-language image track can never be picked."""
     text = [t for t in tracks if t["codec"] in TEXT_CODECS]
     extract_text_tracks(ffmpeg, video, text, work)
     for t in tracks:
+        if t["codec"] in IMAGE_CODECS and t["frames"] is None and not t["english"]:
+            t["verdict"], t["per_min"], t["dialogue_lines"] = "not read", 0.0, 0
+            t["note"] = "image subtitles not tagged English"
+            continue
         if t["codec"] in IMAGE_CODECS:
             if t["frames"] is None:
                 t["events"] = image_events(ffprobe, video, t["index"], offset)
@@ -216,10 +227,8 @@ def assess(ffmpeg, ffprobe, video, tracks, duration, offset, work):
             t["verdict"], t["per_min"], t["dialogue_lines"] = "unsupported", 0.0, 0
             t["note"] = "codec cannot be burned in"
             continue
-        if t["forced"]:
-            t["verdict"], t["per_min"] = "signs-songs", t["dialogue_lines"] / (duration / 60)
-        else:
-            t["verdict"], t["per_min"] = classify(t["dialogue_lines"], duration, t["title"] if t["kind"] == "embedded" else "")
+        t["verdict"], t["per_min"] = classify(t["dialogue_lines"], duration,
+                                              t["title"] if t["kind"] == "embedded" else "", t["forced"])
 
 
 def choose(tracks):
@@ -267,7 +276,7 @@ def dump_fonts(ffmpeg, video, info, fonts):
 
 def render(ffmpeg, video, info, track, start, end, audio, out, work):
     duration = end - start
-    cmd = [ffmpeg, "-v", "error", "-stats", "-y", "-ss", f"{start:.3f}", "-i", str(video), "-t", f"{duration:.3f}"]
+    cmd = [ffmpeg, "-v", "error", "-y", "-ss", f"{start:.3f}", "-i", str(video), "-t", f"{duration:.3f}"]
     if track["codec"] in IMAGE_CODECS:
         cmd += ["-filter_complex", f"[0:v:0][0:{track['index']}]overlay=eof_action=pass,format=yuv420p[v]", "-map", "[v]"]
     else:
@@ -279,9 +288,7 @@ def render(ffmpeg, video, info, track, start, end, audio, out, work):
     if audio is not None:
         cmd += ["-map", f"0:a:{audio}", "-c:a", "aac", "-b:a", "192k"]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", str(out)]
-    result = subprocess.run(cmd, cwd=work, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
-    if result.returncode:
-        sys.exit(f"render failed ({result.returncode}):\n{result.stderr.strip()[-2000:]}")
+    run(cmd, cwd=work)
 
 
 def main():
@@ -317,9 +324,10 @@ def main():
         sys.exit("the video has no subtitle streams and no subtitle files sit next to it")
     with tempfile.TemporaryDirectory(prefix="hardsub-clip-") as tmp:
         work = Path(tmp)
-        assess(ffmpeg, ffprobe, video, tracks, duration, offset, work)
         for t in tracks:
             t["english"] = is_english(t["lang"], t["title"])
+        assess(ffmpeg, ffprobe, video, tracks, duration, offset, work)
+        for t in tracks:
             if not t["english"] and t["lang"].lower() in UNTAGGED_LANGS and "events" in t:
                 t["english"] = t["sniffed"] = text_looks_english(t["events"])
         print(f"{video.name}  ({duration / 60:.1f} min)")

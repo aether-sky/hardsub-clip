@@ -18,7 +18,7 @@ Timestamps are times in the episode: `83`, `1:23`, `1:23.5` or `1:02:03`. Turn w
 said ("12m34s", "at 12:34 until 12:50") into one of these forms. Pass the range exactly as asked:
 the script pads each end by half a second, and when the padded start falls inside a dialogue line
 it moves back to half a second before that line, so the clip never opens mid-sentence. Output defaults to
-`~\Videos\clips\<video name> [12m34s-12m50s].mp4`; pass `-o` when the user names a place.
+`$env:USERPROFILE\Videos\clips\<video name> [12m34s-12m50s].mp4`; pass `-o` when the user names a place.
 
 ## How the track is chosen
 

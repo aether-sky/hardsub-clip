@@ -49,6 +49,10 @@ class AssTests(unittest.TestCase):
         self.assertEqual(hardsub_clip.classify(40, 24 * 60, "Signs & Songs")[0], "signs-songs")
         self.assertEqual(hardsub_clip.classify(40, 24 * 60)[0], "unclear")
 
+    def test_forced_track_is_signs_songs_even_without_a_duration(self):
+        self.assertEqual(hardsub_clip.classify(300, 24 * 60, forced=True)[0], "signs-songs")
+        self.assertEqual(hardsub_clip.classify(5, 0, forced=True), ("signs-songs", 0.0))
+
 
 class ClipRangeTests(unittest.TestCase):
     LINES = [{"start": 10.0, "end": 13.0, "style": "Default", "raw": "Hello there.", "text": "Hello there."},
@@ -81,10 +85,17 @@ class TrackTests(unittest.TestCase):
 
     def test_unsupported_codec_is_listed_without_being_read(self):
         caption = {"kind": "embedded", "index": 3, "codec": "eia_608", "lang": "eng", "title": "", "forced": False,
-                   "default": True, "frames": None}
+                   "default": True, "frames": None, "english": True}
         hardsub_clip.assess(None, None, Path("x.mkv"), [caption], 24 * 60, 0.0, Path("."))
         self.assertEqual(caption["verdict"], "unsupported")
-        self.assertIsNone(hardsub_clip.choose([dict(caption, english=True)]))
+        self.assertIsNone(hardsub_clip.choose([caption]))
+
+    def test_image_track_not_tagged_english_is_not_read(self):
+        # ffprobe is None, so reading the track would fail.
+        pgs = {"kind": "embedded", "index": 4, "codec": "hdmv_pgs_subtitle", "lang": "spa", "title": "",
+               "forced": False, "default": False, "frames": None, "english": False}
+        hardsub_clip.assess(None, None, Path("x.mkv"), [pgs], 24 * 60, 0.0, Path("."))
+        self.assertEqual(pgs["verdict"], "not read")
 
     def test_sidecar_language_from_name(self):
         video = Path("Show - 01.mkv")
