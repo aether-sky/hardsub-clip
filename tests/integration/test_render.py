@@ -43,7 +43,7 @@ def pgs_display_set(pts, number, box):
 class RenderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ffmpeg, _ = hardsub_clip.find_tools()
+        cls.ffmpeg, cls.ffprobe = hardsub_clip.find_tools()
         cls.dir = tempfile.TemporaryDirectory()
         d = Path(cls.dir.name)
         # Every subtitle track below shows a line during the first three seconds of every six.
@@ -71,6 +71,13 @@ class RenderTests(unittest.TestCase):
         cls.late_video = d / "Episode 03.mkv"
         cls.make([*BACKGROUND, "-i", str(d / "full.ass"), "-map", "0", "-map", "1", *encode,
                   "-metadata:s:s:0", "language=eng", "-output_ts_offset", "10", str(cls.late_video)])
+        cls.sidecar_video = d / "Episode 04.mkv"
+        cls.make([*BACKGROUND, "-c:v", "libx264", "-preset", "ultrafast", str(cls.sidecar_video)])
+        (d / "Episode 04.en.ass").write_text((d / "full.ass").read_text(), encoding="utf-16")
+        # The video is cropped to 640x270 while the PGS canvas stays 640x360, as on cropped Blu-ray remuxes.
+        cls.cropped_video = d / "Episode 05.mkv"
+        cls.make(["-f", "lavfi", "-i", "color=c=0x202060:s=640x270:r=24:d=120", "-i", str(d / "boxes.sup"),
+                  "-map", "0", "-map", "1", *encode, "-metadata:s:s:0", "language=eng", str(cls.cropped_video)])
 
     @classmethod
     def make(cls, args):
@@ -97,10 +104,27 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(result.stderr, b"")
         return sum(b > 200 for b in result.stdout)
 
+    def read(self, video):
+        """The video's tracks, read and assessed as the script does before it picks one."""
+        info = hardsub_clip.probe(self.ffprobe, video)
+        tracks = hardsub_clip.candidate_tracks(info, video)
+        with tempfile.TemporaryDirectory() as work:
+            hardsub_clip.read_tracks(self.ffmpeg, self.ffprobe, video, tracks, 0.0, Path(work))
+        for t in tracks:
+            hardsub_clip.assess(t, hardsub_clip.media_duration(info))
+        return tracks
+
     def test_signs_track_is_recognised_even_when_default(self):
-        report = self.run_clip(self.video, "--list")
-        self.assertRegex(report, r"Signs & Songs.*-> signs-songs")
-        self.assertRegex(report, r"\"English\".*-> full")
+        tracks = self.read(self.video)
+        self.assertEqual({t.title: t.verdict for t in tracks}, {"Signs & Songs": "signs-songs", "English": "full"})
+        self.assertEqual(hardsub_clip.choose(tracks).title, "English")
+
+    def test_utf16_sidecar_is_read_and_burned_in(self):
+        [sidecar] = self.read(self.sidecar_video)
+        self.assertEqual((sidecar.english, sidecar.verdict), (True, "full"))
+        clip = Path(self.dir.name) / "sidecar-clip.mp4"
+        self.run_clip(self.sidecar_video, "0:34", "0:45", "-o", str(clip))
+        self.assertGreater(self.bright_pixels(clip, 4), 200)
 
     def test_attached_font_named_by_absolute_path_is_not_written_there(self):
         # The fixture's font attachment is named C:\Windows\Fonts\arial.ttf; dumping by that name would overwrite it.
@@ -110,8 +134,7 @@ class RenderTests(unittest.TestCase):
 
     def test_full_track_lines_land_at_their_clip_times(self):
         clip = Path(self.dir.name) / "clip.mp4"
-        report = self.run_clip(self.video, "0:34", "0:45", "-o", str(clip))
-        self.assertIn("\"English\"", report.split("using", 1)[1].splitlines()[0])
+        self.run_clip(self.video, "0:34", "0:45", "-o", str(clip))
         # Padding starts the clip at episode 33.5 s, so clip 4 s is 37.5 s, inside line 6, and clip 1 s is
         # 34.5 s, between lines.
         self.assertGreater(self.bright_pixels(clip, 4), 200)
@@ -129,6 +152,12 @@ class RenderTests(unittest.TestCase):
         # The padded start, 30.5 s, falls inside the 30-33 s box, so the clip starts at 29.5 s: clip 0.25 s is
         # 29.75 s, before the box appears, and clip 1 s is 30.5 s, inside it.
         self.assertEqual(self.bright_pixels(clip, 0.25), 0)
+        self.assertGreater(self.bright_pixels(clip, 1), 200)
+
+    def test_pgs_canvas_larger_than_the_video_is_fitted_inside_it(self):
+        clip = Path(self.dir.name) / "cropped-clip.mp4"
+        self.run_clip(self.cropped_video, "0:31", "0:40", "-o", str(clip))
+        # At 0,0 the box (canvas rows 300-340) would sit below the 270-row frame; fitted, it lands in rows 225-255.
         self.assertGreater(self.bright_pixels(clip, 1), 200)
 
 
