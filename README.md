@@ -5,6 +5,10 @@ burned in. Give Claude a video file and a start and end time; it finds the Engli
 track, makes sure it isn't just a "signs and songs" track, and renders an mp4 you can share
 anywhere.
 
+## Notes from a Human
+
+I'd always wanted a feature in a media player where you could make a clip of something, similar to the clip feature on youtube or twitch to share with friends. It's easy enough with ffmpeg and some fiddling, but then you don't have subtitles, and the process is tedious. This finds the subs automatically, burns them in, and does all the fiddling for you.
+
 ## Install
 
 1. Copy this folder to `~/.claude/skills/hardsub-clip` (Claude Code picks it up next session).
